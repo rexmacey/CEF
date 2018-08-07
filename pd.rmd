@@ -45,8 +45,9 @@ pd <- cef_daily %>%
     mutate(PDZ = (prem - SMA200)/SD200) %>%
     mutate(PD21L = lead(prem, 21, fill=NA)) %>%
     mutate(PDZ21L = (PD21L - SMA200)/SD200) %>%
+    mutate(PDChg = PD21L - prem) %>%
     mutate(Ret21L = roll_prodl(return.mkt+1, n=21, fill=NA)/roll_prodl(return.mkt+1, n=1, fill=NA)-1) %>%
-    select(symbol, date, prem, SMA200, SD200, PD21L, PDZ, PDZ21L) %>%
+    select(symbol, date, prem, SMA200, SD200, PD21L, PDZ, PDZ21L, PDChg) %>%
     na.omit
 ```
 
@@ -67,7 +68,7 @@ When discounts <= -1sd
 ```{r}
 disc <- pd %>%
     filter(PDZ <= -1) %>%
-    select(symbol, PDZ, PDZ21L) %>%
+    select(symbol, PDZ, PDZ21L, PDChg) %>%
     mutate(ZDiff = PDZ21L - PDZ) %>%
     mutate(ZRatio = PDZ21L/PDZ)
 summary(disc)
@@ -83,7 +84,7 @@ When premiums >= 1sd
 ```{r}
 prem <- pd %>%
     filter(PDZ >= 1) %>%
-    select(symbol, PDZ, PDZ21L) %>%
+    select(symbol, PDZ, PDZ21L, PDChg) %>%
     mutate(ZDiff = PDZ21L - PDZ) %>%
     mutate(ZRatio = PDZ21L/PDZ)
 summary(prem)
@@ -98,4 +99,52 @@ grid.arrange(p1, p2, ncol=2)
 ```
 
 For this one CEF, it does appear that discounts and premiums beyong 1 sd narrow.  Discounts narrow more in a month than premiums.    
+
+### All CEFs
+Now let's do something similar for all the CEFs.
+
+```{r}
+pd <- cef_daily %>% 
+    group_by(symbol) %>%
+    arrange(symbol, date) %>%
+    mutate(SMA200 = roll_meanr(prem, 200, fill=NA)) %>%
+    mutate(SD200 = roll_sdr(prem, 200, fill=NA)) %>%
+    mutate(PDZ = (prem - SMA200)/SD200) %>%
+    mutate(PD21L = lead(prem, 21, fill=NA)) %>%
+    mutate(PDZ21L = (PD21L - SMA200)/SD200) %>%
+    mutate(PDChg = PD21L - prem) %>%
+    mutate(Ret21L = roll_prodl(return.mkt+1, n=21, fill=NA)/roll_prodl(return.mkt+1, n=1, fill=NA)-1) %>%
+    select(symbol, date, prem, SMA200, SD200, PD21L, PDZ, PDZ21L, PDChg) %>%
+    na.omit
+```
+
+When discounts <= -1sd     
+```{r}
+disc <- pd %>%
+    filter(PDZ <= -1) %>%
+    select(symbol, PDZ, PDZ21L, PDChg) %>%
+    mutate(ZDiff = PDZ21L - PDZ) %>%
+    mutate(ZRatio = PDZ21L/PDZ)
+summary(disc)
+```
+
+If this is correct, the next summary should match the summary for AFB.
+
+```{r}
+summary(disc[disc$symbol=="AFB",])
+```
+
+When premiums >= 1sd 
+```{r}
+prem <- pd %>%
+    filter(PDZ >= 1) %>%
+    select(symbol, PDZ, PDZ21L, PDChg) %>%
+    mutate(ZDiff = PDZ21L - PDZ) %>%
+    mutate(ZRatio = PDZ21L/PDZ)
+summary(prem)
+```
+
+### Comments    
+The good news is that discounts and premiums shrink even using these off the cuff parameters.  I would have hoped for more.  The small shrinkage may have something to do with our universe. Perhaps if we included equities it would be greater.
+
 
