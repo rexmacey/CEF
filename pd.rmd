@@ -1,0 +1,101 @@
+---
+title: "Premium Discount Notebook"
+output:
+  html_document: default
+  html_notebook: default
+---
+
+An exploration into the times series nature of premium and discounts for CEFs. The goal is to be able to make a prediction about the premium/discount (PD)
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE, comment = "")
+```
+
+```{r initializeEnvironment, echo=FALSE, message=FALSE, warning=FALSE}
+# This should be run after getCEFdata.R is executed
+library(lubridate)
+library(readxl)
+library(quantmod)
+library(fundAnalysis)
+library(xml2)
+library(rvest)
+library(tidyquant)
+library(ggplot2)
+library(TTR)
+library(gridExtra)
+library(RcppRoll)
+```
+```{r loaddata, echo=FALSE}
+run_getCEFdata.R <- FALSE
+if(run_getCEFdata.R) {
+    source("getCEFdata.R")
+} else {
+    load(paste0("./data/","CEF_data.rdata"))
+} 
+```
+
+We'll start with one CEF (Ticker AFB). Does a large discount or premium relative to a historical mean tend to revert toward the mean?  For the mean we create a rolling 200 day moving average (SMA200).  We also create a rolling 200 day standard deviation.  The premium/discount (PD) is normalized in the variable PDZ.  PD21L is the PD 21 days (approximately one month) into the future.  PDZ21L is PD21L normalized using the current (same time as PDZ) SMA200 and SD200.  So if SMA200, SD200, and PDZ are calculated on 6/1/XXXX, PD21L will be the PD about one calendar month in the future.  PDZ21L is PD21L normalized using the average and standard deviation as of 6/1/XXXX.  The reason for this is that as of the current date (e.g. 6/1/XXXX), we want to see how the PD moves using data as of the current date. The 200 and 21 days were chosen without much thought and we may want to investigate other values. 
+
+```{r}
+sym <- "AFB"
+pd <- cef_daily %>% 
+    filter(symbol == sym) %>%
+    mutate(SMA200 = roll_meanr(prem, 200, fill=NA)) %>%
+    mutate(SD200 = roll_sdr(prem, 200, fill=NA)) %>%
+    mutate(PDZ = (prem - SMA200)/SD200) %>%
+    mutate(PD21L = lead(prem, 21, fill=NA)) %>%
+    mutate(PDZ21L = (PD21L - SMA200)/SD200) %>%
+    mutate(Ret21L = roll_prodl(return.mkt+1, n=21, fill=NA)/roll_prodl(return.mkt+1, n=1, fill=NA)-1) %>%
+    select(symbol, date, prem, SMA200, SD200, PD21L, PDZ, PDZ21L) %>%
+    na.omit
+```
+
+The following chart shows the premium / discount over time along with the SMA200 and dotted lines one standard deviation around the average.    
+```{r}
+ggplot(data = pd, aes(x=date, y=prem)) + geom_line(aes(color="Prem/Disc")) +
+    geom_line(aes(y=SMA200, color="SMA200")) +
+    geom_line(aes(y=SMA200+SD200, color="SMA+SD"), size=1, linetype="dotted") +
+    geom_line(aes(y=SMA200-SD200, color="SMA-SD"), size=1, linetype="dotted") +
+    ggtitle("PD and Moving Average") + xlab("Date") + ylab("Value") + 
+    scale_color_manual(name="", values = c("Prem/Disc" = "blue", "SMA200" = "black", "SMA+SD" = "red", "SMA-SD" = "red")) + 
+    theme(legend.position = "top")
+```
+
+Let's look at the PD one month after the value is one standard deviation below (discount) or above (premium) the SMA200.  Specifically we want to see how the PDZ changes.  Note: these are not premiums/discounts in the absolute sense, but relative to the SMA200.
+
+When discounts <= -1sd    
+```{r}
+disc <- pd %>%
+    filter(PDZ <= -1) %>%
+    select(symbol, PDZ, PDZ21L) %>%
+    mutate(ZDiff = PDZ21L - PDZ) %>%
+    mutate(ZRatio = PDZ21L/PDZ)
+summary(disc)
+```
+
+```{r}
+p1 <- qplot(disc$PDZ, disc$ZDiff, main = "Discounts", xlab="PDZ", ylab="ZDiff")
+p2 <- qplot(disc$PDZ, disc$ZRatio, main = "Discounts", xlab="PDZ", ylab="ZRatio")
+grid.arrange(p1, p2, ncol=2)
+```
+
+When premiums >= 1sd    
+```{r}
+prem <- pd %>%
+    filter(PDZ >= 1) %>%
+    select(symbol, PDZ, PDZ21L) %>%
+    mutate(ZDiff = PDZ21L - PDZ) %>%
+    mutate(ZRatio = PDZ21L/PDZ)
+summary(prem)
+```
+
+
+```{r}
+p1 <- qplot(prem$PDZ, prem$ZDiff, main = "Premiums", xlab="PDZ", ylab="ZDiff")
+p2 <- qplot(prem$PDZ, prem$ZRatio, main = "Premiums", xlab="PDZ", ylab="ZRatio")
+grid.arrange(p1, p2, ncol=2)
+
+```
+
+For this one CEF, it does appear that discounts and premiums beyong 1 sd narrow.  Discounts narrow more in a month than premiums.    
+
