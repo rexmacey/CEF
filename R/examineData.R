@@ -14,7 +14,8 @@ library(gridExtra)
 run_getCEFdata.R <- FALSE
 if(run_getCEFdata.R) {
     source("getCEFdata.R")
-} else {load(paste0("./data/","CEF_data.rdata"))
+} else {
+    load(paste0("./data/","CEF_data.rdata"))
 } 
 
 # examineData -------------------------------------------------------------
