@@ -1,0 +1,298 @@
+---
+title: "CEF"
+runtime: shiny
+output:
+  flexdashboard::flex_dashboard:
+    orientation: rows
+    source_code: embed
+---
+
+
+```{r setup, message = FALSE, include=FALSE}
+knitr::opts_chunk$set(message = FALSE, warning = FALSE, comment = NA)
+library(tidyverse)
+library(highcharter)
+library(tidyquant)
+library(timetk)
+library(tibbletime)
+library(glue)
+library(data.table)
+library(DT)
+library(readxl)
+
+#load("cef_jkr_list.Rdata")
+
+cef_jkr <- 
+  read_excel("Data/CEFList.xlsx", sheet = "FundList")
+
+cef_choices <- setNames(cef_jkr$Ticker, cef_jkr$Name)
+```
+
+Sidebar {.sidebar}
+=====================================
+  
+```{r}
+
+selectInput("cef", "choose CEF", cef_choices)
+
+#selectInput("mf", "choose Mut Fund", mf_choices)
+
+numericInput("rolling_window", "choose rolling window", 200, min = 50, max = 300)
+
+numericInput("future_window", "choose future window", 21,  min = 5, max = 100)
+
+numericInput("pdz_thresh", "choose pdz thresh", 1,  min = .01, max = 3)
+
+dateInput("date", "Starting Date", "2010-01-01", format = "yyyy-mm-dd")
+
+actionButton("go", "Submit")
+
+cef_name <- eventReactive(input$go, {
+  names(cef_choices[cef_choices == input$cef])
+})
+
+cef_symbol <- eventReactive(input$go, {input$cef})
+
+cef_nav_symbol <- eventReactive(input$go, {glue("X", input$cef, "X", sep="")})
+
+pdz_thresh <- eventReactive(input$go, {input$pdz_thresh})
+```
+
+```{r}
+cef_merged_data <- eventReactive(input$go, {
+
+    cef_symbol <- cef_symbol()
+    cef_name <- cef_name()
+
+cef_mkt <-
+    tq_get(cef_symbol,
+           get = "stock.prices",
+          from = input$date) %>%
+    dplyr::select(date, close, adjusted, volume) %>%
+    filter(adjusted != "NA") %>%
+    mutate(date = ymd(date)) %>%
+    add_column(Name = cef_name, Ticker = cef_symbol, .before = 1)
+
+cef_nav_symbol <- cef_nav_symbol()
+
+cef_navs <-
+    tq_get(cef_nav_symbol,
+           get = "stock.prices",
+           from = input$date) %>%
+    dplyr::select(date, close, adjusted) %>%
+    filter(adjusted != "NA")  %>%
+    mutate(date = ymd(date)) %>%
+    add_column(Name = cef_name, Ticker = cef_nav_symbol, .before = 1)
+
+# create a tibble to hold cef close and cef nav
+# add log returns and a premium which is mkt close/ nav close
+cef_merged_data <-
+    merge(cef_navs, cef_mkt,
+              by = c("Name", "date"),
+              suffix = c("_nav", "_mkt"),
+              all = TRUE) %>%
+    as_tibble() %>%
+    mutate(premium = 100 * (close_mkt / close_nav - 1),
+           return_mkt = (log(adjusted_mkt) - log(lag(adjusted_mkt))),
+           return_nav = (log(adjusted_nav) - log(lag(adjusted_nav)))) %>%
+    dplyr::select(Name, date, premium,
+                  Ticker_mkt,close_mkt, adjusted_mkt, return_mkt, volume,
+                  Ticker_nav, close_nav, adjusted_nav, return_nav)
+
+})
+```
+
+
+```{r}
+
+rolling_window <- eventReactive(input$go, {
+    input$rolling_window
+})
+
+future_window <- eventReactive(input$go, {
+    input$future_window
+})
+
+
+
+prem_discount <- eventReactive(input$go, {
+    
+    sma_rollified <- rollify(mean, window = rolling_window())
+
+sd_rollified <- rollify(sd, window = rolling_window())
+
+product_rollified_future <- rollify(prod, window = future_window())
+
+product_rollified_1 <- rollify(prod, window = 1)
+    
+prem_discount <- 
+cef_merged_data() %>% 
+    #filter(Ticker == input$sym) %>%
+    select(Ticker_mkt, date, premium, return_mkt) %>% 
+    mutate(
+           #SMA200 = roll_meanr(premium, 200, fill = NA),
+           sma_rollified_window = sma_rollified(premium),
+           #SD200 = roll_sdr(premium, 200, fill = NA),
+           sd_rollified_window = sd_rollified(premium),
+           #PDZ = (premium - SMA200)/SD200,
+           prem_disc_z = (premium - sma_rollified_window)/sd_rollified_window,
+           prem_disc_21_days_future = lead(premium, future_window(), fill = NA),
+           #PDZ21L = (PD21L - SMA200)/SD200,
+           prem_disc_z_21_days_future = (prem_disc_21_days_future - sma_rollified_window)/
+             sd_rollified_window,
+           #PDChg = PD21L - premium,
+           prem_disc_chg = prem_disc_21_days_future - premium,
+           # Ret21L = 
+           #     roll_prodl(return_mkt + 1, n = 21, fill  = NA)/
+           #   roll_prodl(return_mkt + 1, n = 1, fill = NA)-1)
+           return_21_l_rollified = 
+             product_rollified_future(return_mkt + 1) %>% lead(n = future_window() - 1)/
+             product_rollified_1(return_mkt + 1) - 1,
+           prem_disc_chg_z = prem_disc_z_21_days_future - prem_disc_z,
+           z_ratio= prem_disc_z_21_days_future/prem_disc_z) %>%
+    select(Ticker_mkt, date, premium, 
+           sma_rollified_window, sd_rollified_window, 
+           prem_disc_21_days_future, prem_disc_z, prem_disc_z_21_days_future, prem_disc_chg,
+           prem_disc_chg_z, z_ratio) %>%
+    na.omit()
+})
+
+
+```
+
+
+Returns
+=====================================  
+
+Row {.tabset}
+-------------------------------------
+
+### Prem Discount Moving Average
+
+```{r}
+renderPlot({
+prem_discount() %>% 
+ggplot(aes(x = date)) + 
+    geom_line(aes(y = premium, color = "Prem/Disc")) +
+    geom_line(aes(y = sma_rollified_window, color = "SMA")) +
+    geom_line(aes(y = sma_rollified_window + sd_rollified_window, color = "SMA+SD"), 
+              size = 1, 
+              linetype = "dotted") +
+    geom_line(aes(y = sma_rollified_window - sd_rollified_window, color = "SMA-SD"), 
+              size = 1, 
+              linetype = "dotted") +
+    ggtitle("Prem Discount and Moving Average") + 
+    xlab("") +
+    ylab("Value") + 
+    scale_color_manual(name = "", 
+                       values = c("Prem/Disc" = "blue", 
+                                  "SMA" = "black", 
+                                  "SMA+SD" = "green", 
+                                  "SMA-SD" = "red")) + 
+    theme(plot.title = element_text(hjust = 0.5))
+})
+```
+
+### Highcharter
+
+```{r}
+renderHighchart({
+  prem_discount_xts <-
+  prem_discount() %>%
+      mutate(sma_plus_sd = sma_rollified_window + sd_rollified_window,
+             sma_minus_sd = sma_rollified_window - sd_rollified_window) %>% 
+     tk_xts(date_var = date)
+     
+  highchart(type = "stock") %>% 
+  hc_add_series(prem_discount_xts$premium, 
+                name = "premium", 
+                color = "blue", 
+                lineWidth = .5) %>% 
+  hc_add_series(prem_discount_xts$sma_plus_sd, 
+                name = "sma", 
+                color = "black", 
+                lineWidth = .5) %>%
+  hc_add_series(prem_discount_xts$sma_rollified_window, 
+                name = "sma plus sd", 
+                dashStyle = "DashDot", 
+                color = "green") %>%
+ hc_add_series(prem_discount_xts$sma_minus_sd, 
+               name = "sma minus sd", 
+               dashStyle = "DashDot", 
+               color = "red") %>%
+  hc_navigator(enabled = FALSE) %>% 
+  hc_scrollbar(enabled = FALSE) %>% 
+  hc_add_theme(hc_theme_flat()) %>%
+  hc_exporting(enabled = TRUE) %>% 
+  hc_legend(enabled = TRUE) %>% 
+  hc_tooltip(pointFormat = 
+'{series.name}:${point.y:.2f}',
+             shared = FALSE)
+})
+```
+
+
+
+Premium Discount Reversion {.tabset .tabset-fade}
+-----------------------------
+
+### Premium to Diff in Future
+
+```{r}
+renderPlot({
+prem_discount() %>% 
+  filter(prem_disc_z >= pdz_thresh()) %>% 
+  ggplot(aes(x = prem_disc_z)) +
+  geom_point(aes(y = prem_disc_chg_z), color = "lightblue") +
+  labs(title = paste("Premium", cef_name(), sep = " "),
+       y = glue("Prem Diff", future_window() , "days after hitting", pdz_thresh(), sep = " "),
+       x = "premium z") +
+  theme(plot.title = element_text(hjust = 0.5))
+})
+```
+
+
+### Summary Premium
+
+```{r}
+renderPrint({
+prem_discount() %>% 
+  filter(prem_disc_z >= 1) %>% 
+    dplyr::select(
+           prem_disc_21_days_future, prem_disc_z, 
+           prem_disc_z_21_days_future, prem_disc_chg,
+           prem_disc_chg_z, z_ratio) %>% 
+    summary()
+})
+```
+
+
+### Discount Diff in Future
+
+```{r}
+renderPlot({
+prem_discount() %>% 
+  filter(prem_disc_z <= pdz_thresh()) %>% 
+  ggplot(aes(x = prem_disc_z)) +
+  geom_point(aes(y = prem_disc_chg_z), color = "pink") +
+  labs(title = paste("Discount", cef_name(), sep = " "),
+       y = glue("Disc Diff", future_window() , "days after hitting", pdz_thresh(), sep = " "),
+       x = "discount z") + 
+  theme(plot.title = element_text(hjust = 0.5))
+})
+```
+
+### Summary Discount
+
+```{r}
+renderPrint({
+prem_discount() %>% 
+  filter(prem_disc_z <= -1) %>% 
+    dplyr::select(
+           prem_disc_21_days_future, prem_disc_z, 
+           prem_disc_z_21_days_future, prem_disc_chg,
+           prem_disc_chg_z, z_ratio) %>% 
+    summary()
+})
+```
+

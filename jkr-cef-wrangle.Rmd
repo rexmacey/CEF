@@ -1,0 +1,273 @@
+---
+title: "Wrangle CEF data"
+output: html_notebook
+---
+
+```{r setup, message = FALSE, warning = FALSE}
+knitr::opts_chunk$set(message = FALSE, warning = FALSE, comment = NA)
+library(tidyverse)
+library(tidyquant)
+library(readxl)
+```
+
+### Get CEF tickers from the spreadsheet
+
+For shiny, the user will tell us the ticker, or name of the fund
+
+```{r}
+cef_jkr <- 
+  read_excel("Data/CEFList.xlsx", sheet = "FundList")
+
+
+```
+
+### Import price data, calculate returns, and navs, save as one tibble
+
+```{r}
+
+start_date <- "2010-01-01"
+
+cef_mkt <- 
+    tq_get(cef_jkr$Ticker,
+           get = "stock.prices",
+          from = start_date) %>% 
+    dplyr::select(Ticker = symbol, date, close, adjusted, volume) %>% 
+    filter(adjusted != "NA") %>% 
+    mutate(date = ymd(date)) %>% 
+    left_join(cef_jkr, by = "Ticker") %>% 
+    dplyr::select(Name, Ticker, date, close, adjusted, volume) %>% 
+    group_by(Name)
+
+afb_mkt <- 
+    tq_get("AFB",
+           get = "stock.prices",
+          from = start_date) %>% 
+    dplyr::select(date, close, adjusted, volume) %>% 
+    filter(adjusted != "NA") %>% 
+    mutate(date = ymd(date)) %>% 
+  add_column(Name = cef_jkr$Name[1], Ticker = "AFB", .before = 1)
+    dplyr::select(Name, Ticker, date, close, adjusted, volume) %>% 
+    group_by(Name)
+
+cef_navs <- 
+    tq_get(cef_jkr$NAVTicker,
+           get = "stock.prices",
+           from = start_date) %>% 
+    dplyr::select(NAVTicker = symbol, date, close, adjusted) %>% 
+    filter(adjusted != "NA")  %>% 
+    mutate(date = ymd(date)) %>% 
+    left_join(cef_jkr, by = "NAVTicker") %>% 
+    dplyr::select(Name, NAVTicker, date, close, adjusted)  %>% 
+    group_by(Name)
+  
+# create a tibble to hold cef close and cef nav
+# add log returns and a premium which is mkt close/ nav close
+cef_merged_data <- 
+    merge(cef_navs, cef_mkt,
+              by = c("Name", "date"),
+              suffix = c("_nav", "_mkt"),
+              all = TRUE) %>%
+    as_tibble() %>% 
+    group_by(Name) %>%
+    mutate(premium = 100 * (close_mkt / close_nav - 1),
+           return_mkt = (log(adjusted_mkt) - log(lag(adjusted_mkt))),
+           return_nav = (log(adjusted_nav) - log(lag(adjusted_nav)))) %>%
+    dplyr::select(Name, date, premium, Ticker, 
+                  close_mkt, adjusted_mkt, return_mkt, volume, 
+                  NAVTicker, close_nav, adjusted_nav, return_nav)
+
+
+```
+
+What is the premium/discount? It's the extent to which the closing price of the CEF is above (premium) or below (discount) the closing price of the NAV CEF. They should be the same. 
+
+### Get mutual fund data
+
+```{r}
+mf_tickers <- tribble(
+    ~Name, ~Ticker,
+    "Vanguard Interm Term Tax Exempt Adm Fd", "VWIUX", 
+    "DFA Muni Bd Port Inst", "DFMPX",
+    "Vanguard Limited Term Tax Exempt Inv Sh", "VMLTX"
+)
+
+mf_prices_returns <- 
+    tq_get(mf_tickers$Ticker,
+           get = "stock.prices", 
+           from = start_date) %>%
+    dplyr::select(Ticker = symbol, date, adjusted) %>%
+    left_join(mf_tickers, by = "Ticker") %>%  
+    mutate(return = log(adjusted) - log(lag(adjusted))) %>% 
+    dplyr::select(Name, date, return, Ticker, adjusted)
+```
+
+### Choose one closed end fund and one mutual fund for comparison
+
+```{r}
+afb <- 
+  cef_merged_data %>% 
+    filter(Ticker == "AFB") %>%
+    filter(return_nav != "NA") %>%
+    select(Ticker, date, return_nav, premium)
+
+vwiux <- 
+  mf_prices_returns %>%
+    filter(Ticker == "VWIUX") %>%
+    filter(return != "NA") %>%
+    select(Ticker, date, return)
+```
+
+### Create rolling cumreturn and correlation functions
+
+```{r}
+library(tibbletime)
+
+cumret <- function(data){
+    prod(1 + data, na.rm = TRUE) - 1
+}
+
+# create rolling functions
+# cor_rollified_30 <-  rollify(~cor(.x, .y), window = 30)
+cum_ret_rollified <- rollify(cumret, window = 5)
+cor_rollified_25 <-  rollify(~cor(.x, .y), window = 25)
+```
+ 
+### Apply the rolling functions to one cef and one mutual fund
+
+```{r}
+afb_vwiux_combined <- 
+  inner_join(afb, vwiux, by = "date", suffix = c("_afb","_vwiux")) %>% 
+  rename(return_vwiux = return) %>% 
+  as_tbl_time(index = date) %>%
+  mutate(return_nav_week = cum_ret_rollified(return_nav),
+         return_vwiux_week = cum_ret_rollified(return_vwiux),
+         cor_week = cor_rollified_25(return_nav_week, return_vwiux_week))
+```
+
+### Apply the rolling functions to all cefs and one mutual fund
+
+```{r}
+
+cef_all <- 
+  cef_merged_data %>% 
+    filter(return_nav != "NA") %>%
+    select(Ticker, date, return_nav, premium)
+
+# create a tibble to hold data for all cefs and vwiux
+cefs_all_vwiux <- 
+  inner_join(cef_all, vwiux, by = "date", suffix = c("_cef","_vwiux")) %>% 
+  rename(return_vwiux = return) %>% 
+  as_tbl_time(index = date) %>%
+  mutate(return_nav_week = cum_ret_rollified(return_nav),
+         return_vwiux_week = cum_ret_rollified(return_vwiux),
+         cor_week = cor_rollified_25(return_nav_week, return_vwiux_week))
+```
+
+### Run rolling regression of all cefs on the chosen mutual fund
+
+```{r}
+# Rex's function, slightly altered, same output
+# calculate regression and extract custom values
+lmcust <- function(x, y){
+    temp <- (lm(x ~ y))
+    return(c(coef(temp), 
+             summary(temp)$adj.r.squared, 
+             sd(temp$residuals)*sqrt(252/5), 
+             mean(abs(temp$residuals))
+             ))
+}
+
+
+# Make Rex's rolling with rollify
+lm_cust_rollified <- rollify(lmcust, 
+                        window = 25, 
+                        unlist = FALSE)
+
+# the following code flow will run the custom rolling lm of all cefs on the chosen mutual fund
+# might take a few seconds to run
+cef_vwiux_lm_custom_roll <- 
+  cefs_all_vwiux %>% 
+  mutate(rolling_model = 
+           lm_cust_rollified(return_vwiux_week, 
+                      return_nav_week)) %>%
+  slice(-1:-24) %>%
+  # the next two lines look complicated but it's just reorganizing results, no new calculations
+  mutate(r = map(rolling_model, ~ data.frame(t(.)))) %>%
+  unnest(r) %>%
+  select(-rolling_model) %>% 
+  rename(intercept = X.Intercept., 
+         slope = y, 
+         AdjR2 = V3, 
+         ResidTE = V4,
+         ResidMAD = V5 ) %>% 
+  mutate(pred_vwiux_week = lag(intercept) + lag(slope) * return_nav_week,
+         err_week = pred_vwiux_week - return_vwiux_week)
+```
+
+### JKR addition from tidy world
+
+Let's run a rolling regression that is not customized, using `rollify` and `lm`. Then we can use `tidy` and `glance` to store the results, then `nest` to make the data more compact. This is very similar to the above, except it doesn't extract custom values. It extracts full model results and saves as list columns
+
+```{r}
+# Simple regression rolling
+lm_rollified <- rollify(~lm(.x ~ .y), 
+                        window = 25, 
+                        unlist = FALSE)
+
+library(broom)
+cef_vwiux_lm_roll <- 
+  cefs_all_vwiux %>% 
+  mutate(rolling_model = 
+           lm_rollified(return_vwiux_week, 
+                      return_nav_week)) %>%
+  slice(-1:-24) %>%
+  mutate(tidied = map(rolling_model,
+                      tidy),
+         glanced = map(rolling_model,
+                       glance)) %>% 
+  select(-rolling_model) %>% 
+  nest(-Name)
+
+cef_vwiux_lm_roll
+```
+
+Question to Rex: I didn't quite understand what was going on in the `justweeks` flow in the code chunk below. 
+```{r}    
+
+justweeks <- comb[seq(nrow(comb)%%5, to=nrow(comb), by=5),] %>%
+    filter(!is.na(return.nav.week)) %>%
+    filter(!is.na(return.mf.week)) %>%
+    filter(!is.na(pred.mf.week))
+
+temp <- justweeks %>% 
+    tq_mutate(mutate_fun = rollapply,
+          select = c(return.nav, return.mf),
+          width = 126,
+          FUN = cor,
+          by.column = FALSE,
+          col_rename = c("ok2del1", "cor.week2", "ok2del2", "ok2del3")) %>%
+    select(-starts_with("ok2del"))
+
+lm_daily <- lm(return.mf ~ return.nav, data=comb[comb$date>"2018-01-08",])
+lm_weekly <- lm(return.mf.week ~ return.nav.week, data=justweeks[justweeks$date>"2018-01-08",])
+summary(lm_daily)
+summary(lm_weekly)
+
+sd(comb$return.mf[comb$date>"2018-01-08"])
+sd(comb$return.nav[comb$date>"2018-01-08"])
+sd(comb$return.mf[comb$date>"2018-01-08"]) / sd(comb$return.nav[comb$date>"2018-01-08"])
+sd(justweeks$return.mf.week[justweeks$date>"2018-01-08"])
+sd(justweeks$return.nav.week[justweeks$date>"2018-01-08"])
+sd(justweeks$return.mf.week[justweeks$date>"2018-01-08"]) / sd(justweeks$return.nav.week[justweeks$date>"2018-01-08"])
+
+sd(test2$err.mf.week, na.rm = TRUE)*sqrt(252/5)   
+mean(abs(test2$err.mf.week)-mean(test2$err.mf.week, na.rm=TRUE), na.rm = TRUE)
+
+```
+
+
+
+
+
+
+
