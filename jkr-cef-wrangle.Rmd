@@ -37,17 +37,17 @@ cef_mkt <-
     left_join(cef_jkr, by = "Ticker") %>% 
     dplyr::select(Name, Ticker, date, close, adjusted, volume) %>% 
     group_by(Name)
-
-afb_mkt <- 
-    tq_get("AFB",
-           get = "stock.prices",
-          from = start_date) %>% 
-    dplyr::select(date, close, adjusted, volume) %>% 
-    filter(adjusted != "NA") %>% 
-    mutate(date = ymd(date)) %>% 
-  add_column(Name = cef_jkr$Name[1], Ticker = "AFB", .before = 1)
-    dplyr::select(Name, Ticker, date, close, adjusted, volume) %>% 
-    group_by(Name)
+# 
+# afb_mkt <- 
+#     tq_get("AFB",
+#            get = "stock.prices",
+#           from = start_date) %>% 
+#     dplyr::select(date, close, adjusted, volume) %>% 
+#     filter(adjusted != "NA") %>% 
+#     mutate(date = ymd(date)) %>% 
+#   add_column(Name = cef_jkr$Name[1], Ticker = "AFB", .before = 1)
+#     dplyr::select(Name, Ticker, date, close, adjusted, volume) %>% 
+#     group_by(Name)
 
 cef_navs <- 
     tq_get(cef_jkr$NAVTicker,
@@ -76,7 +76,7 @@ cef_merged_data <-
                   close_mkt, adjusted_mkt, return_mkt, volume, 
                   NAVTicker, close_nav, adjusted_nav, return_nav)
 
-
+save(cef_merged_data, file = "cef_merged_data.Rdata")
 ```
 
 What is the premium/discount? It's the extent to which the closing price of the CEF is above (premium) or below (discount) the closing price of the NAV CEF. They should be the same. 
