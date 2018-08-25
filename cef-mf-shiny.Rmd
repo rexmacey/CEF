@@ -1,0 +1,286 @@
+---
+title: "CEF v MF"
+runtime: shiny
+output:
+  flexdashboard::flex_dashboard:
+    orientation: rows
+    source_code: embed
+---
+
+
+```{r setup, message = FALSE, include=FALSE}
+knitr::opts_chunk$set(message = FALSE, warning = FALSE, comment = NA)
+library(tidyverse)
+library(highcharter)
+library(tidyquant)
+library(timetk)
+library(tibbletime)
+library(glue)
+library(data.table)
+library(DT)
+library(readxl)
+
+
+cef_jkr <- 
+  read_excel("Data/CEFList.xlsx", sheet = "FundList")
+
+cef_choices <- setNames(cef_jkr$Ticker, cef_jkr$Name)
+
+mf_tickers <- tribble(
+    ~Name, ~Ticker,
+    "Vanguard Interm Term Tax Exempt Adm Fd", "VWIUX",
+    "DFA Muni Bd Port Inst", "DFMPX",
+    "Vanguard Limited Term Tax Exempt Inv Sh", "VMLTX"
+)
+
+mf_choices <- setNames(mf_tickers$Ticker, mf_tickers$Name)
+
+cumret <- function(data){
+    prod(1 + data, na.rm = TRUE) - 1
+}
+
+# create rolling functions
+cum_ret_rollified <- rollify(cumret, window = 5)
+cor_rollified_25 <-  rollify(~cor(.x, .y), window = 25)
+
+# Rex's function, slightly altered, same output
+# calculate regression and extract custom values
+lmcust <- function(x, y){
+    temp <- (lm(x ~ y))
+    return(c(coef(temp),
+             summary(temp)$adj.r.squared,
+             sd(temp$residuals)*sqrt(252/5),
+             mean(abs(temp$residuals))
+             ))
+}
+
+
+# Make Rex's rolling with rollify
+lm_cust_rollified <- rollify(lmcust,
+                        window = 25,
+                        unlist = FALSE)
+
+# Simple regression rolling
+# lm_rollified <- rollify(~lm(.x ~ .y), 
+#                         window = 25, 
+#                         unlist = FALSE)
+
+```
+
+Sidebar {.sidebar}
+=====================================
+  
+```{r}
+
+selectInput("cef", "choose CEF", cef_choices)
+
+selectInput("mf", "choose Mut Fund", mf_choices)
+
+dateInput("date", "Starting Date", "2010-01-01", format = "yyyy-mm-dd")
+
+actionButton("go", "Submit")
+
+cef_name <- eventReactive(input$go, {
+  names(cef_choices[cef_choices == input$cef])
+})
+
+cef_symbol <- eventReactive(input$go, {input$cef})
+
+cef_nav_symbol <- eventReactive(input$go, {glue("X", input$cef, "X", sep="")})
+
+mf_name <- eventReactive(input$go, {
+  names(mf_choices[mf_choices == input$mf])
+})
+
+mf_symbol <- eventReactive(input$go, {input$mf})
+
+ 
+```
+
+```{r}
+cef_merged_data <- eventReactive(input$go, {
+
+    cef_symbol <- cef_symbol()
+    cef_name <- cef_name()
+
+cef_mkt <-
+    tq_get(cef_symbol,
+           get = "stock.prices",
+          from = input$date) %>%
+    dplyr::select(date, close, adjusted, volume) %>%
+    filter(adjusted != "NA") %>%
+    mutate(date = ymd(date)) %>%
+    add_column(Name = cef_name, Ticker = cef_symbol, .before = 1)
+
+cef_nav_symbol <- cef_nav_symbol()
+ 
+cef_navs <-
+    tq_get(cef_nav_symbol,
+           get = "stock.prices",
+           from = input$date) %>%
+    dplyr::select(date, close, adjusted) %>%
+    filter(adjusted != "NA")  %>%
+    mutate(date = ymd(date)) %>%
+    add_column(Name = cef_name, Ticker = cef_nav_symbol, .before = 1)
+
+# create a tibble to hold cef close and cef nav
+# add log returns and a premium which is mkt close/ nav close
+cef_merged_data <-
+    merge(cef_navs, cef_mkt,
+              by = c("Name", "date"),
+              suffix = c("_nav", "_mkt"),
+              all = TRUE) %>%
+    as_tibble() %>%
+    mutate(premium = 100 * (close_mkt / close_nav - 1),
+           return_mkt = (log(adjusted_mkt) - log(lag(adjusted_mkt))),
+           return_nav = (log(adjusted_nav) - log(lag(adjusted_nav)))) %>%
+    dplyr::select(Name, date, premium,
+                  Ticker_mkt,close_mkt, adjusted_mkt, return_mkt, volume,
+                  Ticker_nav, close_nav, adjusted_nav, return_nav)
+
+})
+```
+
+```{r}
+mf_prices_returns <- eventReactive(input$go, {
+
+mf_symbol <- mf_symbol()
+    mf_name <- mf_name()
+
+   mf_prices_returns <-  tq_get(mf_symbol,
+           get = "stock.prices",
+           from = input$date) %>%
+    dplyr::select(date, adjusted) %>%
+    add_column(Name = mf_name, Ticker = mf_symbol, .before = 1) %>%
+    mutate(return = log(adjusted) - log(lag(adjusted)))
+})
+```
+
+```{r}
+cef_mf_combined <- eventReactive(input$go, {
+  
+mf_prices_returns <- mf_prices_returns()
+cef_merged_data <- cef_merged_data()
+
+cef_mf_combined <- 
+  inner_join(cef_merged_data, mf_prices_returns, 
+             by = "date", 
+             suffix = c("_cef","_mf")) %>% 
+  rename(return_mf = return) %>% 
+  as_tbl_time(index = date) %>%
+  mutate(return_nav_week = cum_ret_rollified(return_nav),
+         return_mf_week = cum_ret_rollified(return_mf),
+         cor_week = cor_rollified_25(return_nav_week, return_mf_week))
+})
+```
+
+```{r}
+cef_mf_rollified_lm <- eventReactive(input$go, {
+  
+mf_prices_returns <- mf_prices_returns()
+cef_merged_data <- cef_merged_data()
+
+cef_mf_rollified_lm <- 
+  inner_join(cef_merged_data, mf_prices_returns, 
+             by = "date", 
+             suffix = c("_cef","_mf")) %>% 
+  rename(return_mf = return) %>% 
+  as_tbl_time(index = date) %>%
+  mutate(return_nav_week = cum_ret_rollified(return_nav),
+         return_mf_week = cum_ret_rollified(return_mf),
+         cor_week = cor_rollified_25(return_nav_week, return_mf_week)) %>% 
+  mutate(rolling_model = 
+           lm_cust_rollified(return_mf_week, 
+                      return_nav_week)) %>%
+  slice(-1:-24) %>%
+  # the next two lines look complicated but it's just reorganizing results, no new calculations
+  mutate(r = map(rolling_model, ~ data.frame(t(.)))) %>%
+  unnest(r) %>%
+  select(-rolling_model) %>% 
+  rename(intercept = X.Intercept., 
+         slope = y, 
+         AdjR2 = V3, 
+         ResidTE = V4,
+         ResidMAD = V5 ) %>% 
+  mutate(pred_mf_week = lag(intercept) + lag(slope) * return_nav_week,
+         err_week = pred_mf_week - return_mf_week)
+})
+```
+
+Returns
+=====================================  
+
+
+Row {.tabset .tabset-fade}
+-------------------------------------
+
+### CEF Market Close v. NAV Close
+
+```{r}
+renderHighchart({
+  cef_merged_data_xts <-
+  cef_merged_data() %>%
+     tk_xts(date_var = date)
+  
+  highchart(type = "stock") %>% 
+  hc_add_series(cef_merged_data_xts$close_mkt, name = cef_symbol()) %>% 
+  hc_add_series(cef_merged_data_xts$close_nav, name = cef_nav_symbol()) %>%
+  hc_title(text = glue(cef_name(), "versus", mf_name(), sep = " ")) %>% 
+  hc_navigator(enabled = FALSE) %>% 
+  hc_scrollbar(enabled = FALSE) %>% 
+  hc_add_theme(hc_theme_flat()) %>%
+  hc_exporting(enabled = TRUE) %>% 
+  hc_legend(enabled = TRUE) %>% 
+  hc_tooltip(pointFormat = 
+'{series.name}:${point.y:.2f}',
+             shared = FALSE)
+
+})
+```
+
+
+Row
+-----------------------------
+
+### rolling predictions highcharter
+
+```{r}
+renderHighchart({
+  cef_mf_rollified_lm_xts <- 
+    cef_mf_rollified_lm() %>%
+     tk_xts(date_var = date)
+  
+  highchart(type = "stock") %>% 
+  hc_add_series(cef_mf_rollified_lm_xts$pred_mf_week, name = "predicted return") %>% 
+  hc_add_series(cef_mf_rollified_lm_xts$return_mf_week, name = "actual return") %>% 
+  hc_add_series(cef_mf_rollified_lm_xts$err_week, name = "error") %>%
+  hc_title(text = glue("Predicted v. Actual Returns for ", mf_name(), sep = "")) %>% 
+  hc_navigator(enabled = FALSE) %>% 
+  hc_scrollbar(enabled = FALSE) %>% 
+  hc_add_theme(hc_theme_flat()) %>%
+  hc_exporting(enabled = TRUE) %>% 
+  hc_legend(enabled = TRUE) %>% 
+  hc_tooltip(pointFormat = 
+'{series.name}:{point.y:.4f}%',
+             shared = FALSE)
+})
+```
+
+Raw Data
+=====================================  
+
+Row
+------------------------------------
+
+### Raw Data 
+
+```{r}
+renderDataTable({
+    cef_merged_data() %>% 
+        datatable(., 
+                  fillContainer = TRUE, 
+                  extensions = 'Buttons', 
+            options = list(dom = 'Bfrtip', 
+                           buttons = c('csv', 'excel')))
+})
+```

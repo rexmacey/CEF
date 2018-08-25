@@ -1,0 +1,307 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+An exploration into the times series nature of premium and discounts for CEFs. The goal is to be able to make a prediction about the premium/discount (PD)
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE, comment = NA)
+
+library(readxl)
+library(tibbletime)
+library(tidyverse)
+library(tidyquant)
+library(readxl)
+```
+
+### Load data
+
+In the Notebook titled `jkr-cef-wrangle`, we imported data for all the cef's, market and nav, and saved in a data frame called `cef_merged_data`. Let's load that data here.
+
+```{r}
+# cef_jkr <- 
+#   read_excel("Data/CEFList.xlsx", sheet = "FundList")
+
+load("cef_merged_data.Rdata")
+
+
+```
+
+We'll start with one CEF (Ticker AFB). Does a large discount or premium relative to a historical mean tend to revert toward the mean?  For the mean we create a rolling 200 day moving average (SMA200).  We also create a rolling 200 day standard deviation.  The premium/discount (PD) is normalized in the variable PDZ.  PD21L is the PD 21 days (approximately one month) into the future.  PDZ21L is PD21L normalized using the current (same time as PDZ) SMA200 and SD200.  So if SMA200, SD200, and PDZ are calculated on 6/1/XXXX, PD21L will be the PD about one calendar month in the future.  PDZ21L is PD21L normalized using the average and standard deviation as of 6/1/XXXX.  The reason for this is that as of the current date (e.g. 6/1/XXXX), we want to see how the PD moves using data as of the current date. The 200 and 21 days were chosen without much thought and we may want to investigate other values. 
+
+Choose symbol, rolling window and future window.
+
+```{r}
+sym <- "AFB"
+future_window <- 21
+rolling_window <- 200
+```
+
+Create rolling functions.
+
+```{r}
+
+sma_rollified <- rollify(mean, window = rolling_window)
+sd_rollified <- rollify(sd, window = rolling_window)
+product_rollified_future <- rollify(prod, window = future_window)
+product_rollified_1 <- rollify(prod, window = 1)
+```
+
+JKR's code flow is below, with the originals commented out to show how they map. The substance is exactly the same but with the rolling functions created using `tibbletime` instead of `RcppRoll`. I prefer `tibbletime` because it's purpose built for use with `tibbles` and it's easier to create custom rollers. 
+
+```{r}
+prem_discount <- 
+cef_merged_data %>% 
+    filter(Ticker == sym) %>%
+    select(Ticker, date, premium, return_mkt) %>% 
+    mutate(
+           #SMA200 = roll_meanr(premium, 200, fill = NA),
+           sma_rollified_200 = sma_rollified(premium),
+           #SD200 = roll_sdr(premium, 200, fill = NA),
+           sd_rollified_200 = sd_rollified(premium),
+           # PDZ = (premium - SMA200)/SD200,
+           # normalized prem/disc today
+           prem_disc_z = (premium - sma_rollified_200)/sd_rollified_200,
+           # prem/disc in 21 days
+           # PD21L = lead(prem, 21, fill=NA)
+           prem_disc_21_days_future = lead(premium, 21, fill = NA),
+           # prem/disc in 21 days, normalized by today's data
+           # PDZ21L = (PD21L - SMA200)/SD200
+           prem_disc_z_21_days_future = (prem_disc_21_days_future - 
+                                        sma_rollified_200)/sd_rollified_200,
+           # how much prem/disc changed in 21 days
+           # PDChg = PD21L - prem 
+           prem_disc_chg = prem_disc_21_days_future - premium,
+           # Ret21L = 
+           #     roll_prodl(return_mkt + 1, n = 21, fill  = NA)/
+           #   roll_prodl(return_mkt + 1, n = 1, fill = NA)-1)
+           return_21_days_future = 
+             product_rollified_future(return_mkt + 1) %>% lead(n = future_window - 1)/
+             product_rollified_1(return_mkt + 1) - 1,
+           # ZDiff = PDZ21L - PDZ
+           prem_disc_chg_z = prem_disc_z_21_days_future - prem_disc_z,
+           # ZRatio = PDZ21L/PDZ
+           z_ratio= prem_disc_z_21_days_future/prem_disc_z) %>%
+    select(Ticker, date, premium, 
+           sma_rollified_200, sd_rollified_200, 
+           prem_disc_21_days_future, prem_disc_z, 
+           prem_disc_z_21_days_future, prem_disc_chg,
+           prem_disc_chg_z, z_ratio) %>%
+    na.omit()
+
+```
+
+The following chart shows the premium / discount over time along with the SMA200 and dotted lines one standard deviation around the average.  
+
+```{r}
+prem_discount %>% 
+ggplot(aes(x = date)) + 
+    geom_line(aes(y = premium, color = "Prem/Disc")) +
+    geom_line(aes(y = sma_rollified_200, color = "SMA200")) +
+    geom_line(aes(y = sma_rollified_200 + sd_rollified_200, color = "SMA+SD"), 
+              size = 1, 
+              linetype = "dotted") +
+    geom_line(aes(y = sma_rollified_200 - sd_rollified_200, color = "SMA-SD"), 
+              size = 1, 
+              linetype = "dotted") +
+    ggtitle("Prem Discount and Moving Average") + 
+    xlab("") +
+    ylab("Value") + 
+    scale_color_manual(name = "", 
+                       values = c("Prem/Disc" = "blue", 
+                                  "SMA200" = "black", 
+                                  "SMA+SD" = "red", 
+                                  "SMA-SD" = "red")) + 
+    theme(plot.title = element_text(hjust = 0.5))
+```
+
+Plot of normalized premium on x-axis and the change 21 days in the future, when the normalized is greater than 1.
+
+```{r}
+
+prem_discount %>% 
+  filter(prem_disc_z >= 1) %>% 
+  ggplot(aes(x = prem_disc_z)) +
+  geom_point(aes(y = prem_disc_chg_z), color = "lightblue") +
+  labs(title = paste("Premium", sym, sep = " "),
+       y = "z diff",
+       x = "premium x") +
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+Plot of normalized discount on x-axis and the change 21 days in the future, when the normalized is less than -1.
+
+```{r}
+prem_discount %>% 
+  filter(prem_disc_z <= -1) %>% 
+  ggplot(aes(x = prem_disc_z)) +
+  geom_point(aes(y = prem_disc_chg_z), color = "lightblue") +
+  labs(title = paste("Discount", sym, sep = " "),
+       y = "change discount 21 days future",
+       x = "discount today") +
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+
+### All CEFs
+Now let's do something similar for all the CEFs.
+JKR, I needed to filter out three CEFs and several where the ticker came through as NA - wasn't able to get price data from yahoo! for these. 
+
+```{r}
+cef_merged_data %>% 
+    count(Ticker) %>% 
+    filter(n < 400)
+```
+
+
+```{r}
+prem_discount_all <- 
+cef_merged_data %>%
+    filter(Ticker != "NA" &
+           Ticker != "MUH" &
+           Ticker != "DSM" &
+           Ticker != "NXP") %>% 
+    group_by(Ticker) %>%
+    arrange(Ticker, date) %>%
+    select(Ticker, date, premium, return_mkt) %>% 
+    mutate(
+           sma_rollified_200 = sma_rollified(premium),
+           sd_rollified_200 = sd_rollified(premium),
+           prem_disc_z = (premium - sma_rollified_200)/sd_rollified_200,
+           prem_disc_21_days_future = lead(premium, 21, fill = NA),
+           prem_disc_z_21_days_future = (prem_disc_21_days_future - 
+                                        sma_rollified_200)/sd_rollified_200,
+           prem_disc_chg = prem_disc_21_days_future - premium,
+           return_21_days_future = 
+             product_rollified_future(return_mkt + 1) %>% lead(n = future_window - 1)/
+             product_rollified_1(return_mkt + 1) - 1,
+           prem_disc_chg_z = prem_disc_z_21_days_future - prem_disc_z,
+           z_ratio = prem_disc_z_21_days_future/prem_disc_z) %>%
+    select(Ticker, date, premium, 
+           sma_rollified_200, sd_rollified_200, 
+           prem_disc_21_days_future, prem_disc_z, 
+           prem_disc_z_21_days_future, prem_disc_chg,
+           prem_disc_chg_z, return_21_days_future) %>%
+    na.omit()
+```
+
+
+```{r}
+prem_discount_all %>% 
+    filter(prem_disc_z <= -1) %>% 
+    dplyr::select(Ticker,
+           prem_disc_21_days_future, prem_disc_z, 
+           prem_disc_z_21_days_future, prem_disc_chg,
+           prem_disc_chg_z, return_21_days_future) %>% 
+    summary()
+```
+
+```{r}
+prem_discount_all %>% 
+    filter(prem_disc_z >= 1) %>% 
+    dplyr::select(Ticker,
+           prem_disc_21_days_future, prem_disc_z, 
+           prem_disc_z_21_days_future, prem_disc_chg,
+           prem_disc_chg_z, return_21_days_future) %>% 
+    summary()
+
+```
+
+
+### Original code flows
+
+These code chunks were not run in this Notebook and they won't run because variable names have been changed. 
+
+
+```{r, eval = FALSE}
+pd <- cef_merged_data %>% 
+    group_by(Ticker) %>%
+    arrange(Ticker, date) %>%
+    mutate(SMA200 = roll_meanr(premium, 200, fill = NA),
+           SD200 = roll_sdr(premium, 200, fill = NA),
+           PDZ = (premium - SMA200)/SD200,
+           PD21L = lead(premium, 21, fill = NA),
+           PDZ21L = (PD21L - SMA200)/SD200,
+           PDChg = PD21L - premium,
+           Ret21L = 
+               roll_prodl(return_mkt + 1, n = 21, fill = NA)/
+               roll_prodl(return_mkt + 1, n = 1, fill = NA)-1) %>%
+    select(Ticker, date, premium, SMA200, SD200, PD21L, PDZ, PDZ21L, PDChg) %>%
+    na.omit()
+```
+
+Let's look at the PD one month after the value is one standard deviation below (discount) or above (premium) the SMA200.  Specifically we want to see how the PDZ changes.  
+
+Note: these are not premiums/discounts in the absolute sense, but relative to the SMA200.
+
+When discounts <= -1sd    
+```{r, eval = FALSE}
+disc <- 
+    pd %>%
+    filter(PDZ <= -1) %>%
+    select(Ticker, PDZ, PDZ21L, PDChg) %>%
+    mutate(ZDiff = PDZ21L - PDZ) %>%
+    mutate(ZRatio = PDZ21L/PDZ)
+summary(disc)
+```
+
+```{r, eval = FALSE}
+p1 <- qplot(disc$PDZ, disc$ZDiff, main = "Discounts", xlab="PDZ", ylab="ZDiff")
+p2 <- qplot(disc$PDZ, disc$ZRatio, main = "Discounts", xlab="PDZ", ylab="ZRatio")
+gridExtra::grid.arrange(p1, p2, ncol=2)
+```
+
+When premiums >= 1sd    
+```{r, eval = FALSE}
+prem <- pd %>%
+    filter(PDZ >= 1) %>%
+    select(Ticker, PDZ, PDZ21L, PDChg) %>%
+    mutate(ZDiff = PDZ21L - PDZ) %>%
+    mutate(ZRatio = PDZ21L/PDZ)
+summary(prem)
+```
+
+
+```{r, eval = FALSE}
+p1 <- qplot(prem$PDZ, prem$ZDiff, main = "Premiums", xlab="PDZ", ylab="ZDiff")
+p2 <- qplot(prem$PDZ, prem$ZRatio, main = "Premiums", xlab="PDZ", ylab="ZRatio")
+gridExtra::grid.arrange(p1, p2, ncol=2)
+
+```
+
+For this one CEF, it does appear that discounts and premiums beyond 1 sd narrow.  Discounts narrow more in a month than premiums.    
+
+
+When discounts <= -1sd   
+
+```{r, eval = FALSE}
+disc <- pd %>%
+    filter(PDZ <= -1) %>%
+    select(Ticker, PDZ, PDZ21L, PDChg) %>%
+    mutate(ZDiff = PDZ21L - PDZ) %>%
+    mutate(ZRatio = PDZ21L/PDZ)
+summary(disc)
+```
+
+If this is correct, the next summary should match the summary for AFB.
+
+```{r, eval = FALSE}
+summary(disc[disc$Ticker=="AFB",])
+```
+
+When premiums >= 1sd 
+
+```{r, eval = FALSE}
+prem <- pd %>%
+    filter(PDZ >= 1) %>%
+    select(Ticker, PDZ, PDZ21L, PDChg) %>%
+    mutate(ZDiff = PDZ21L - PDZ) %>%
+    mutate(ZRatio = PDZ21L/PDZ)
+summary(prem)
+```
+
+### Comments    
+The good news is that discounts and premiums shrink even using these off the cuff parameters.  I would have hoped for more.  The small shrinkage may have something to do with our universe. Perhaps if we included equities it would be greater.
+
+
